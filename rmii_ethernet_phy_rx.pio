@@ -1,0 +1,75 @@
+/*
+ * Copyright (c) Rob Scott, with portions copyrighted as below
+ *
+ * Copyright (c) 2021 Sandeep Mistry
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
+/*
+// GPIO assignments from the original RMII code
+.define public PICO_RMII_ETHERNET_SM_RX       1
+.define public PICO_RMII_ETHERNET_SM_TX       0
+.define public PICO_RMII_ETHERNET_RX_PIN      6 // rx pin start: RX0, RX1, CRS
+.define public PICO_RMII_ETHERNET_TX_PIN     10 // tx pin start: TX0, TX1, TX-EN
+.define public PICO_RMII_ETHERNET_RETCLK_PIN 21
+.define public PICO_RMII_ETHERNET_RST_PIN    13
+*/
+// GPIO assignments from LAAS CNRS RS485 Setup
+.define public PICO_RMII_ETHERNET_SM_RX       1
+.define public PICO_RMII_ETHERNET_SM_TX       0
+.define public PICO_RMII_ETHERNET_RX_PIN      12 // rx pin start: RX0, RX1, CRS
+.define public PICO_RMII_ETHERNET_TX_PIN     26 // tx pin start: TX0, TX1, TX-EN
+.define public PICO_RMII_ETHERNET_RETCLK_PIN 21
+.define public PICO_RMII_ETHERNET_RST_PIN    20
+
+
+// PIO program 1: Generate RMII clk from RP2XXX system clock
+// Assumes that we're running at 100 MHz, 2 times faster than RMII clk
+
+.program rmii_ethernet_phy_rx_data
+.wrap_target
+start:
+    wait 1 pin 2      ; Wait for CR_DV assertion
+    wait 1 pin 1 [2]  ; Wait for Start of Frame Delimiter, align to sample clk
+sample:
+    in pins, 2        ; accumulate di-bits
+    jmp PIN, sample   ; as long as CRS_DV is asserted
+    irq set 0         ; Signal end of active packet
+.wrap
+
+
+% c-sdk {
+
+static inline void rmii_ethernet_phy_rx_init(PIO pio, uint sm, uint offset, uint pin, float div) {
+
+    // Make RX[1:0], CRS_DV inputs
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 3, false);
+
+    // Make RMII clock an input
+    pio_sm_set_consecutive_pindirs(pio, sm, PICO_RMII_ETHERNET_RETCLK_PIN,
+    				   1, false);
+
+    pio_sm_config c = rmii_ethernet_phy_rx_data_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin);
+
+    // Set jump pin to CR_DV
+    sm_config_set_jmp_pin(&c, pin+2);
+
+    pio_gpio_init(pio, pin);      // RX0
+    pio_gpio_init(pio, pin + 1);  // RX1
+    pio_gpio_init(pio, pin + 2);  // CRS (data valid)
+    
+    // Disable synchronizers - remove two clock delays...
+    //hw_clear_bits(&pio->input_sync_bypass, 0x7u << pin);
+
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    sm_config_set_in_shift(&c, true, true, 8);
+
+    // Run at given RMII clock multiplier
+    sm_config_set_clkdiv(&c, div);
+    
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
